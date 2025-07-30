@@ -1,0 +1,160 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PDF Editor Tool</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f4f4f4; }
+    #preview canvas { margin: 10px; border: 1px solid #ccc; cursor: pointer; }
+    .selected { outline: 4px solid red; }
+    button { margin: 5px; padding: 10px; }
+    #drop-zone {
+      border: 2px dashed #bbb; padding: 20px; margin: 10px 0;
+      text-align: center; background: #e9e9e9; color: #666;
+    }
+  </style>
+</head>
+<body>
+  <h2>PDF Editor Tool with Merge & Drag-and-Drop</h2>
+  <div id="drop-zone">Drag and drop PDF files here or use the upload buttons below</div>
+  <input type="file" id="pdf-upload" accept="application/pdf" />
+  <br>
+  <input type="file" id="merge-upload" accept="application/pdf" />
+  <button onclick="mergePDFs()">Merge Uploaded PDFs</button>
+  <div id="preview"></div>
+  <button onclick="rotateSelectedPages()">Rotate Selected Pages</button>
+  <button onclick="splitPDF()">Split PDF Pages</button>
+  <button onclick="downloadZip()">Download All Split Pages (.zip)</button>
+  <div id="download-links"></div>
+
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+
+  <script>
+    const previewDiv = document.getElementById('preview');
+    let pdfBytes, originalPdfDoc, mergePdfBytes;
+    let splitFiles = {};
+
+    // Drag and Drop support
+    const dropZone = document.getElementById('drop-zone');
+    dropZone.addEventListener('dragover', e => {
+      e.preventDefault(); dropZone.style.background = "#d0ffd0";
+    });
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.style.background = "#e9e9e9";
+    });
+    dropZone.addEventListener('drop', async e => {
+      e.preventDefault(); dropZone.style.background = "#e9e9e9";
+      const file = e.dataTransfer.files[0];
+      if (file && file.type === "application/pdf") {
+        pdfBytes = await file.arrayBuffer();
+        renderPDFPreview(pdfBytes);
+      }
+    });
+
+    document.getElementById('pdf-upload').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      pdfBytes = await file.arrayBuffer();
+      renderPDFPreview(pdfBytes);
+    });
+
+    document.getElementById('merge-upload').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      mergePdfBytes = await file.arrayBuffer();
+    });
+
+    async function renderPDFPreview(bytes) {
+      previewDiv.innerHTML = '';
+      const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        const viewport = page.getViewport({ scale: 1.5 });
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+        await page.render({ canvasContext: context, viewport }).promise;
+        canvas.setAttribute('data-page', pageNum);
+        canvas.onclick = () => canvas.classList.toggle('selected');
+        previewDiv.appendChild(canvas);
+      }
+      originalPdfDoc = await PDFLib.PDFDocument.load(bytes);
+    }
+
+    async function rotateSelectedPages() {
+      const newPdf = await PDFLib.PDFDocument.create();
+      const pages = await originalPdfDoc.getPages();
+      for (let i = 0; i < pages.length; i++) {
+        const isSelected = previewDiv.querySelector(`[data-page="${i + 1}"]`).classList.contains('selected');
+        const [copiedPage] = await newPdf.copyPages(originalPdfDoc, [i]);
+        if (isSelected) copiedPage.setRotation(PDFLib.degrees(90));
+        newPdf.addPage(copiedPage);
+      }
+      const rotatedBytes = await newPdf.save();
+      downloadPDF(rotatedBytes, 'rotated.pdf');
+    }
+
+    async function splitPDF() {
+      const downloadLinks = document.getElementById('download-links');
+      downloadLinks.innerHTML = '';
+      splitFiles = {};
+      for (let i = 0; i < originalPdfDoc.getPageCount(); i++) {
+        const newDoc = await PDFLib.PDFDocument.create();
+        const [page] = await newDoc.copyPages(originalPdfDoc, [i]);
+        newDoc.addPage(page);
+        const singlePageBytes = await newDoc.save();
+        const blob = new Blob([singlePageBytes], { type: 'application/pdf' });
+        const fileName = `page-${i + 1}.pdf`;
+        splitFiles[fileName] = blob;
+
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = fileName;
+        link.textContent = `Download ${fileName}`;
+        link.style.display = 'block';
+        downloadLinks.appendChild(link);
+      }
+    }
+
+    async function downloadZip() {
+      const zip = new JSZip();
+      for (let name in splitFiles) {
+        zip.file(name, splitFiles[name]);
+      }
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(zipBlob);
+      link.download = 'split-pages.zip';
+      link.click();
+    }
+
+    async function mergePDFs() {
+      if (!pdfBytes || !mergePdfBytes) {
+        alert('Please upload both PDF files.');
+        return;
+      }
+      const pdf1 = await PDFLib.PDFDocument.load(pdfBytes);
+      const pdf2 = await PDFLib.PDFDocument.load(mergePdfBytes);
+      const mergedPdf = await PDFLib.PDFDocument.create();
+      const pages1 = await mergedPdf.copyPages(pdf1, pdf1.getPageIndices());
+      pages1.forEach(p => mergedPdf.addPage(p));
+      const pages2 = await mergedPdf.copyPages(pdf2, pdf2.getPageIndices());
+      pages2.forEach(p => mergedPdf.addPage(p));
+      const mergedBytes = await mergedPdf.save();
+      downloadPDF(mergedBytes, 'merged.pdf');
+    }
+
+    function downloadPDF(bytes, filename) {
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+    }
+  </script>
+</body>
+</html>
